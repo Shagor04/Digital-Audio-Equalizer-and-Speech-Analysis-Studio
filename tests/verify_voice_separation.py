@@ -1,18 +1,21 @@
 """
 tests/verify_voice_separation.py
 =================================
-Automated correctness check for the pitch-based voice separation
-(core/voice_separation.py). Builds the synthetic two-talker demo
-signal (whose two ground-truth voices we actually have, since it's
-generated), separates it, and checks that each separated stream lines
-up with the RIGHT ground-truth voice -- not just "some output came
-out".
+Automated correctness check for the pitch + frequency-amplitude voice
+separation (core/voice_separation.py). Builds the synthetic two-talker
+and three-talker demo signals (whose ground-truth component voices we
+actually have, since they're generated), separates each, and checks
+that every separated stream lines up with the RIGHT ground-truth voice
+-- not just "some output came out". Each talker is a formant-colored
+(vowel-shaped) synthetic voice, not a plain tone -- see
+core/audio_io.py's VOWEL_FORMANTS / _voice_talker for how.
 
 Portable: all paths derived from this file's own location.
 Run with: python3 tests/verify_voice_separation.py
 Exits non-zero (and prints which assertion failed) if anything is wrong.
 """
 import sys, os
+import itertools
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(TEST_DIR, ".."))
@@ -20,7 +23,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import time
 import numpy as np
-from core.audio_io import make_two_voice_test_signal
+from core.audio_io import make_two_voice_test_signal, make_three_voice_test_signal
 from core.voice_separation import separate_voices
 
 failures = []
@@ -39,75 +42,100 @@ def envelope(sig, frame=1024):
                       for i in range(n_frames)])
 
 
-print("=== Building synthetic two-talker demo (110 Hz voice + 210 Hz voice) ===")
-mix, fs, true_a, true_b = make_two_voice_test_signal(fs=44100, duration=6.0, seed=2, return_components=True)
+def best_pairing(streams, truths):
+    """Try every way of matching separated streams to ground-truth voices
+    (there are only 2 or 3 of them, so brute force is fine) and return the
+    pairing with the highest total envelope correlation, plus, for
+    comparison, the correlation each stream has with every OTHER truth
+    voice it wasn't matched to."""
+    n = len(streams)
+    env_s = [envelope(s) for s in streams]
+    env_t = [envelope(t) for t in truths]
+    m = min(min(len(e) for e in env_s), min(len(e) for e in env_t))
+    corr = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            corr[i, j] = np.corrcoef(env_s[i][:m], env_t[j][:m])[0, 1]
+
+    best_perm, best_total = None, -1e9
+    for perm in itertools.permutations(range(n)):
+        total = sum(corr[i, perm[i]] for i in range(n))
+        if total > best_total:
+            best_total, best_perm = total, perm
+
+    matched = [corr[i, best_perm[i]] for i in range(n)]
+    # for each stream, the best it does against a truth voice it was NOT matched to
+    cross = [max(corr[i, j] for j in range(n) if j != best_perm[i]) for i in range(n)]
+    return best_perm, matched, cross
+
+
+def check_mask_conservation(voices, mix):
+    resum = sum(voices)
+    rms_mix = np.sqrt(np.mean(mix ** 2))
+    rms_diff = np.sqrt(np.mean((resum - mix) ** 2))
+    relative_diff = rms_diff / (rms_mix + 1e-12)
+    print(f"  RMS(sum of voices - mix) / RMS(mix) = {relative_diff:.3f}")
+    check("Sum of separated voices stays within 35% RMS of the original mix", relative_diff < 0.35,
+          f"relative_diff={relative_diff:.3f}")
+
+
+# =====================================================================
+print("=== TWO-VOICE DEMO (~105Hz 'ah/oh' voice + ~220Hz 'ee/eh' voice) ===")
+mix, fs, true_1, true_2 = make_two_voice_test_signal(seed=2, return_components=True)
 print(f"  mix duration={len(mix)/fs:.1f}s @ {fs}Hz")
 
-print("\n=== Running separate_voices(n_voices=2) ===")
 t0 = time.time()
 voices, info = separate_voices(mix, fs, n_voices=2)
-elapsed = time.time() - t0
-print(f"  finished in {elapsed:.2f}s, detected pitch registers: "
+print(f"  finished in {time.time()-t0:.2f}s, detected pitch registers: "
       f"{[f'{p:.1f}Hz' for p in info['pitch_hz']]}")
-print(f"  active_fraction per voice: {[f'{a:.2f}' for a in info['active_fraction']]}")
 
 check("Returned exactly 2 voice streams", len(voices) == 2, f"got {len(voices)}")
-check("Each stream matches input length",
-      all(len(v) == len(mix) for v in voices),
-      f"lengths={[len(v) for v in voices]}")
+check("Each stream matches input length", all(len(v) == len(mix) for v in voices))
 
-print("\n=== Checking detected pitch registers are close to the true 110Hz / 210Hz ===")
-low_pitch, high_pitch = sorted(info["pitch_hz"])
-low_err = abs(low_pitch - 110)
-high_err = abs(high_pitch - 210)
-print(f"  low register: detected {low_pitch:.1f}Hz vs true 110Hz (error {low_err:.1f}Hz)")
-print(f"  high register: detected {high_pitch:.1f}Hz vs true 210Hz (error {high_err:.1f}Hz)")
-check("Low-register pitch within 25Hz of true 110Hz voice", low_err < 25, f"error={low_err:.1f}Hz")
-check("High-register pitch within 25Hz of true 210Hz voice", high_err < 25, f"error={high_err:.1f}Hz")
+true_pitches = [105.0, 220.0]
+for label, detected, truth in zip(["low", "high"], sorted(info["pitch_hz"]), true_pitches):
+    err = abs(detected - truth)
+    print(f"  {label} register: detected {detected:.1f}Hz vs true {truth:.0f}Hz (error {err:.1f}Hz)")
+    check(f"{label.capitalize()}-register pitch within 25Hz of true {truth:.0f}Hz voice", err < 25,
+          f"error={err:.1f}Hz")
 
-print("\n=== Checking each separated stream tracks the RIGHT ground-truth voice ===")
-env_sep = [envelope(v) for v in voices]
-env_true_a = envelope(true_a)
-env_true_b = envelope(true_b)
+perm, matched, cross = best_pairing(voices, [true_1, true_2])
+for i, name in enumerate(["Voice 1 (~105Hz)", "Voice 2 (~220Hz)"]):
+    print(f"  {name}: matched corr={matched[i]:.2f} vs best cross corr={cross[i]:.2f}")
+    check(f"{name}'s matched stream correlates more with its true voice than any other stream does",
+          matched[i] > cross[i], f"{matched[i]:.2f} vs {cross[i]:.2f}")
+    check(f"{name}'s matched correlation is reasonably strong (>0.4)", matched[i] > 0.4, f"{matched[i]:.2f}")
 
-n = min(len(env_sep[0]), len(env_sep[1]), len(env_true_a), len(env_true_b))
+check_mask_conservation(voices, mix)
 
+# =====================================================================
+print("\n=== THREE-VOICE DEMO (~95Hz, ~165Hz, ~250Hz talkers) ===")
+mix3, fs, t1, t2, t3 = make_three_voice_test_signal(seed=3, return_components=True)
+print(f"  mix duration={len(mix3)/fs:.1f}s @ {fs}Hz")
 
-def corr(u, w):
-    return float(np.corrcoef(u[:n], w[:n])[0, 1])
+t0 = time.time()
+voices3, info3 = separate_voices(mix3, fs, n_voices=3)
+print(f"  finished in {time.time()-t0:.2f}s, detected pitch registers: "
+      f"{[f'{p:.1f}Hz' for p in info3['pitch_hz']]}")
 
+check("Returned exactly 3 voice streams", len(voices3) == 3, f"got {len(voices3)}")
+check("Each stream matches input length", all(len(v) == len(mix3) for v in voices3))
 
-# figure out which separated stream (0 or 1) best matches voice A vs voice B
-c0a, c0b = corr(env_sep[0], env_true_a), corr(env_sep[0], env_true_b)
-c1a, c1b = corr(env_sep[1], env_true_a), corr(env_sep[1], env_true_b)
-print(f"  stream0 vs true_A={c0a:.2f}, stream0 vs true_B={c0b:.2f}")
-print(f"  stream1 vs true_A={c1a:.2f}, stream1 vs true_B={c1b:.2f}")
+true_pitches3 = [95.0, 165.0, 250.0]
+for label, detected, truth in zip(["low", "mid", "high"], sorted(info3["pitch_hz"]), true_pitches3):
+    err = abs(detected - truth)
+    print(f"  {label} register: detected {detected:.1f}Hz vs true {truth:.0f}Hz (error {err:.1f}Hz)")
+    check(f"{label.capitalize()}-register pitch within 30Hz of true {truth:.0f}Hz voice", err < 30,
+          f"error={err:.1f}Hz")
 
-if abs(c0a - c1a) + abs(c1b - c0b) > 0:  # always true, just picking the better pairing
-    if c0a + c1b >= c0b + c1a:
-        best_a, best_b = c0a, c1b
-        cross_a, cross_b = c0b, c1a
-    else:
-        best_a, best_b = c1a, c0b
-        cross_a, cross_b = c1b, c0a
+perm3, matched3, cross3 = best_pairing(voices3, [t1, t2, t3])
+for i, name in enumerate(["Voice 1 (~95Hz)", "Voice 2 (~165Hz)", "Voice 3 (~250Hz)"]):
+    print(f"  {name}: matched corr={matched3[i]:.2f} vs best cross corr={cross3[i]:.2f}")
+    check(f"{name}'s matched stream correlates more with its true voice than any other stream does",
+          matched3[i] > cross3[i], f"{matched3[i]:.2f} vs {cross3[i]:.2f}")
+    check(f"{name}'s matched correlation is reasonably strong (>0.35)", matched3[i] > 0.35, f"{matched3[i]:.2f}")
 
-print(f"  best pairing: matched correlation A={best_a:.2f}, B={best_b:.2f} "
-      f"(vs cross correlation A={cross_a:.2f}, B={cross_b:.2f})")
-check("Voice A's matched stream correlates more with true A than the other stream does",
-      best_a > cross_a, f"{best_a:.2f} vs {cross_a:.2f}")
-check("Voice B's matched stream correlates more with true B than the other stream does",
-      best_b > cross_b, f"{best_b:.2f} vs {cross_b:.2f}")
-check("Matched correlation for voice A is reasonably strong (>0.4)", best_a > 0.4, f"{best_a:.2f}")
-check("Matched correlation for voice B is reasonably strong (>0.4)", best_b > 0.4, f"{best_b:.2f}")
-
-print("\n=== Checking mask conservation (separated voices should sum back close to the mix) ===")
-resum = voices[0] + voices[1]
-rms_mix = np.sqrt(np.mean(mix ** 2))
-rms_diff = np.sqrt(np.mean((resum - mix) ** 2))
-relative_diff = rms_diff / (rms_mix + 1e-12)
-print(f"  RMS(sum of voices - mix) / RMS(mix) = {relative_diff:.3f}")
-check("Sum of separated voices stays within 35% RMS of the original mix", relative_diff < 0.35,
-      f"relative_diff={relative_diff:.3f}")
+check_mask_conservation(voices3, mix3)
 
 print()
 if failures:

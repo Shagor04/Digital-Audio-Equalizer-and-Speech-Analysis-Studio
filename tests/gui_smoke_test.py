@@ -16,7 +16,7 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 sys.path.insert(0, PROJECT_ROOT)
 
 import tkinter as tk
-from gui.app import EqualizerApp
+from gui.app import EqualizerApp, DEMO_OPTIONS
 
 root = tk.Tk()
 app = EqualizerApp(root)
@@ -78,12 +78,10 @@ time.sleep(0.3)
 root.update()
 os.system(f'import -window root "{os.path.join(TEST_DIR, "gui_analysis_tab_postfx.png")}"')
 
-# switch to Voice Separation tab, load the two-voice demo, and separate it
-app.notebook.select(3)
-root.update()
-app._load_two_voice_demo()
-app.n_voices_var.set(2)
-app.on_separate_voices()
+# switch to Voice Separation tab via the new Demo dropdown (exercises the
+# real user-facing path: selecting "Two-Voice Demo" auto-separates)
+app.demo_var.set(DEMO_OPTIONS[2][0])  # Two-Voice Demo
+app.on_load_demo()
 root.update()
 time.sleep(0.3)
 root.update()
@@ -97,6 +95,29 @@ app.on_voice_slider(0, 0)
 mixed = app._mixed_voices_output()
 assert mixed.shape == app.x.shape, "mixed voice output shape mismatch"
 print("Mixed voice output OK, shape:", mixed.shape)
+
+# Three-Voice Demo via the same dropdown path
+app.demo_var.set(DEMO_OPTIONS[3][0])  # Three-Voice Demo
+app.on_load_demo()
+root.update()
+time.sleep(0.3)
+root.update()
+assert app.voice_streams is not None and len(app.voice_streams) == 3, "voice separation did not produce 3 streams"
+os.system(f'import -window root "{os.path.join(TEST_DIR, "gui_three_voice_tab.png")}"')
+print("Three-voice pitches:", app.voice_info["pitch_hz"])
+
+# Noise Reduction Demo: confirm it auto-enables both hum removal and spectral gating
+app.demo_var.set(DEMO_OPTIONS[4][0])  # Noise Reduction Demo
+app.on_load_demo()
+root.update()
+assert app.hum_var.get() is True, "noise demo should auto-enable hum removal"
+assert app.noise_reduction_var.get() == "spectral_gate", "noise demo should auto-select spectral_gate"
+app.notebook.select(0)
+root.update()
+time.sleep(0.2)
+root.update()
+os.system(f'import -window root "{os.path.join(TEST_DIR, "gui_noise_demo.png")}"')
+print("Noise demo loaded OK, hum_var:", app.hum_var.get(), "noise_reduction_var:", app.noise_reduction_var.get())
 
 # reload the regular demo music track before the Experiments tab (which
 # expects a normal single-track signal) and continue the smoke test

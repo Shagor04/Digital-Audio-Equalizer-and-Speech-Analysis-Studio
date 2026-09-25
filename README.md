@@ -68,10 +68,11 @@ transform) rather than treated as a black box.
     Voices**, then each detected voice gets its own 5-band graphic EQ, a
     **Solo** button, and a **Mute** toggle; **Play Mixed** / **Export Mixed
     WAV...** re-combine the (optionally per-voice-EQ'd, non-muted) streams.
-    New **"🗣 Two-Voice Demo"** toolbar button loads a synthetic two-talker
+    New **"🗣 Two-Voice Demo"** loads a synthetic two-talker
     signal (two independent synthesized voices in different pitch registers,
     overlapping) since there's no bundled multi-speaker recording to test on
-    otherwise.
+    otherwise. (Step 9 below replaced the original buzzy-tone version of this
+    demo with proper formant-colored voices, and added a three-voice demo.)
     Automated ground-truth test: `tests/verify_voice_separation.py` builds the
     two-voice demo (whose two source voices are known, since they're
     synthesized), separates it, and checks that each separated stream
@@ -97,6 +98,67 @@ transform) rather than treated as a black box.
     redraw cost), driven by elapsed wall-clock time since Play was pressed, so
     it animates correctly regardless of whether this machine actually has
     audio hardware to hear the result on.
+
+- [x] **Step 9 — Voice-like demo signals, three-voice separation, and an audible noise-reduction demo** (`core/audio_io.py`, `gui/app.py`, `tests/`)
+  - **The old two-voice demo didn't sound like two people** -- it was two
+    plain harmonic tones differing only in pitch, buzzy and hard to tell
+    apart by ear even after separation. Fixed with a proper **source-filter
+    voice synthesizer**: each talker is a harmonic "buzz" (the glottal
+    source) shaped by three **formant** resonances (the vocal tract filter)
+    pulled from the classic Peterson & Barney vowel chart, reusing this
+    project's own `peaking_eq_coeffs` biquad (`core/filters.py`) as the
+    formant filter -- the exact building block the Parametric EQ uses,
+    repurposed to *synthesize* a voice instead of *equalizing* one. Each
+    talker also gets its own speaking rhythm (syllable timing), so two or
+    three talkers differ in pitch, timbre (vowel color), *and* rhythm --
+    three independent cues a human listener can use to tell them apart,
+    not just one.
+  - **Three-Voice Demo** (new): a third synthetic talker (low/mid/high
+    registers at ~95/165/250Hz), for trying `n_voices=3` separation.
+    Ground-truth tested exactly like the two-voice case (see below) --
+    matched correlations of 0.83-0.91 against the true source voices, a
+    genuinely hard 3-way separation problem solved convincingly.
+  - **Noise Reduction Demo** (new): a clean, recognizable melody (C-E-G-E-D-C
+    played three times with clear silence between repeats) buried under
+    obvious broadband hiss and 50Hz+100Hz hum. The silence gaps are
+    deliberate -- spectral gating estimates its noise floor from the
+    *median* level across time, so it needs genuinely quiet material to
+    measure (see `core/noise_reduction.py`); the continuous hum is
+    deliberate too, since it demonstrates *why* hum removal has to be a
+    separate notch-filter tool rather than something spectral gating alone
+    can catch (a tone that's always on looks like "signal", not "noise", to
+    a floor-based method). Loading this demo automatically ticks **Remove
+    50Hz hum** and sets **Noise reduction** to `spectral_gate`, so Play
+    Equalized immediately demonstrates both tools together. Measured
+    (`tests/verify_noise_demo.py`): 19.5dB noise-floor reduction in the
+    silent gaps, 36.7dB reduction of the 50Hz hum specifically, and 0.997
+    correlation between the processed and clean melody (i.e. the real
+    content survives essentially intact).
+  - **One combined "Demo" picker** replaces the old one-button-per-demo
+    toolbar row: a single dropdown (Synthetic Test Tone / Music Track /
+    Two-Voice Demo / Three-Voice Demo / Noise Reduction Demo) keeps the
+    toolbar from growing a button per feature, with a small `loaded: ...`
+    label next to it confirming what's active. Selecting a voice demo
+    **automatically switches to the Voice Separation tab and runs
+    Separate Voices**; selecting the noise demo **automatically switches to
+    the DSP Analysis tab** so the improvement is visible (spectrum + before/
+    after metrics), not just audible -- the same "show, don't just tell"
+    idea applied consistently everywhere a demo has a point to prove.
+  - **Bug found and fixed while wiring this up**: switching demos while the
+    Voice Separation tab was showing a previous result left stale numbers
+    on screen (e.g. loading the Noise Reduction Demo while "Voice 1:
+    ~99Hz..." from an earlier separation was still displayed, describing
+    audio that wasn't loaded anymore). `_clear_voice_separation()` now
+    resets the summary text to its idle instructions too, not just the
+    voice data -- a reminder that "clearing state" means clearing
+    everything derived from it, including labels, not just the arrays.
+  - Both new signal types are covered by the same ground-truth testing
+    approach as Step 8: `tests/verify_voice_separation.py` now checks both
+    the two-voice *and* three-voice cases (pitch accuracy + matched-vs-cross
+    correlation for every voice), and the new `tests/verify_noise_demo.py`
+    checks the noise-reduction demo's measured before/after numbers
+    directly, the same "build a signal whose correct answer is known by
+    construction" strategy used throughout this project's test suite.
 
 ## How each part maps to CSE220 theory
 
@@ -181,7 +243,11 @@ The app opens with a synthetic test signal already loaded. Switch between
 the **Graphic EQ** and **Parametric EQ** tabs, drag sliders or pick a
 preset, and the frequency-response plot updates live. Click **Play
 Equalized** to hear it, or **Export Processed WAV...** to save it.
-`Load WAV...` lets you use your own audio file instead.
+`Load WAV...` lets you use your own audio file instead, and the **Demo**
+dropdown next to it switches between five built-in signals (Synthetic Test
+Tone, Music Track, Two-Voice Demo, Three-Voice Demo, Noise Reduction Demo)
+without cluttering the toolbar with one button per demo -- see Step 9 for
+what each one is built to demonstrate.
 
 This project was developed and screenshot-tested in a sandbox with no
 audio hardware — the DSP, sliders, presets, and plots were all verified
@@ -197,9 +263,11 @@ live scrolling waveform and a progress strip for whatever is currently
 playing.
 
 The **"Voice Separation"** tab lets you pull apart a recording of
-multiple overlapping talkers (try the **"🗣 Two-Voice Demo"** button
-first) into 2-3 approximate, individually-equalizable voices — see
-Step 8 below for how it works and its honest limitations.
+multiple overlapping talkers (try **"Two-Voice Demo"** or **"Three-Voice
+Demo"** from the Demo dropdown first, which separates automatically) into
+2-3 approximate, individually-equalizable voices — see
+Step 8 (and Step 9 for the demo signals themselves) below for how it works
+and its honest limitations.
 
 ## Extra CLI flags (Step 5: analysis + hum/noise removal)
 
@@ -295,12 +363,13 @@ combined report.
 python3 tests/verify_voice_separation.py
 ```
 
-Builds the synthetic two-talker demo (a low-register ~110 Hz voice and a
-high-register ~210 Hz voice, overlapping throughout), separates it, and
-checks both (a) the detected pitch registers land close to the true 110/210
-Hz and (b) each separated stream actually correlates with the *matching*
-ground-truth voice rather than the other one -- i.e. it checks the
-separation is *correct*, not just that something came out.
+Builds the synthetic two-talker demo (a low-register ~105 Hz voice and a
+high-register ~220 Hz voice, overlapping throughout, each colored with real
+vowel formants -- see Step 9) and a three-talker demo (~95/165/250Hz),
+separates each, and checks both (a) the detected pitch registers land close
+to the true values and (b) each separated stream actually correlates with
+the *matching* ground-truth voice rather than any other one -- i.e. it
+checks the separation is *correct*, not just that something came out.
 
 Separation uses two combined cues: pitch (clustered on its own, since it's
 the strongest signal) and a frequency-amplitude fingerprint per voice
@@ -308,8 +377,31 @@ the strongest signal) and a frequency-amplitude fingerprint per voice
 whatever the pitch-based harmonic masks can't reach -- mainly unvoiced
 consonants and silence, which have no pitch to track).
 
-In the GUI: load something with more than one talker (or click
-**"🗣 Two-Voice Demo"**), open the **Voice Separation** tab, choose 2 or 3
+In the GUI: pick **"Two-Voice Demo"** or **"Three-Voice Demo"** from the
+Demo dropdown (this separates automatically), or load your own multi-talker
+audio, open the **Voice Separation** tab, choose 2 or 3
 voices, and click **Separate Voices**. Each detected voice gets its own
 5-band EQ, a Solo button, and a Mute toggle; **Play Mixed** / **Export Mixed
 WAV...** recombine whichever voices aren't muted with their EQ applied.
+
+## Noise reduction demo (Step 9)
+
+```bash
+python3 tests/verify_noise_demo.py
+```
+
+Builds the Noise Reduction Demo signal (a clean C-E-G-E-D-C melody, played
+three times with silence between repeats, buried under broadband hiss and
+50Hz+100Hz hum), processes it exactly as the GUI auto-configures it (hum
+removal, then spectral gating), and checks the measured result against the
+signal's own known-clean reference: the noise floor during silent gaps
+drops by 19.5dB, the 50Hz hum drops by 36.7dB, and the processed melody
+still correlates at 0.997 with the clean original -- i.e. the noise is
+demonstrably gone and the real content is demonstrably intact, not just
+"probably fine".
+
+In the GUI: pick **"Noise Reduction Demo"** from the Demo dropdown -- it
+loads the signal, ticks **Remove 50Hz hum**, sets **Noise reduction** to
+`spectral_gate`, and jumps to the **DSP Analysis** tab so you can see the
+before/after spectrum and metrics immediately. Click **Play Original** then
+**Play Equalized** to hear the difference.

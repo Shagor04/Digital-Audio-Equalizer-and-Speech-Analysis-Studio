@@ -28,7 +28,8 @@ from matplotlib.figure import Figure
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.audio_io import (load_wav, save_wav, make_synthetic_test_signal, make_demo_music_signal,
-                            make_two_voice_test_signal, check_and_normalize)
+                            make_two_voice_test_signal, make_three_voice_test_signal,
+                            make_noise_demo_signal, check_and_normalize)
 from core.eq_engine import GraphicEQ, ParametricEQ, TEN_BAND_CENTERS, FIVE_BAND_CENTERS
 from core.analysis import summarize, compute_band_energy
 from core.noise_reduction import NOISE_REDUCTION_METHODS, remove_hum
@@ -45,6 +46,16 @@ except Exception as e:  # pragma: no cover - depends on host machine
     SOUNDDEVICE_OK = False
     SD_ERROR = str(e)
 
+
+# label -> internal key, single source of truth for the toolbar's Demo
+# dropdown and its dispatcher (on_load_demo)
+DEMO_OPTIONS = [
+    ("\U0001F3B9 Synthetic Test Tone", "synthetic"),
+    ("\U0001F3B5 Music Track", "music"),
+    ("\U0001F5E3 Two-Voice Demo", "two_voice"),
+    ("\U0001F465 Three-Voice Demo", "three_voice"),
+    ("\U0001F507 Noise Reduction Demo", "noise"),
+]
 
 PARAM_BAND_DEFAULTS = [
     {"kind": "lowshelf", "f0": 120.0, "gain_db": 0.0, "Q": 0.7, "enabled": True},
@@ -152,6 +163,7 @@ class EqualizerApp:
         style.configure("Header.TFrame", background=BG)
 
         style.configure("TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure("ToolbarMuted.TLabel", background=PANEL, foreground=SUBTEXT, font=("Segoe UI", 9, "italic"))
         style.configure("Card.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
         style.configure("Sub.TLabel", background=CARD, foreground=SUBTEXT, font=("Segoe UI", 9))
         style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 18, "bold"))
@@ -206,9 +218,17 @@ class EqualizerApp:
         top.pack(side="top", fill="x")
 
         ttk.Button(top, text="\U0001F4C2 Load WAV...", command=self.on_load_wav).pack(side="left", padx=3)
-        ttk.Button(top, text="\U0001F3B9 Synthetic Signal", command=self._load_synthetic).pack(side="left", padx=3)
-        ttk.Button(top, text="\U0001F3B5 Demo Music", command=self._load_demo_music).pack(side="left", padx=3)
-        ttk.Button(top, text="\U0001F5E3 Two-Voice Demo", command=self._load_two_voice_demo).pack(side="left", padx=3)
+        ttk.Label(top, text="Demo:", style="TLabel").pack(side="left", padx=(10, 4))
+        self.demo_var = tk.StringVar(value=DEMO_OPTIONS[0][0])
+        demo_combo = ttk.Combobox(
+            top, textvariable=self.demo_var, state="readonly", width=22,
+            values=[label for label, _ in DEMO_OPTIONS])
+        demo_combo.pack(side="left", padx=3)
+        demo_combo.bind("<<ComboboxSelected>>", self.on_load_demo)
+
+        self.loaded_info_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.loaded_info_var, style="ToolbarMuted.TLabel").pack(
+            side="left", padx=(10, 0))
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10, pady=2)
 
@@ -821,20 +841,26 @@ class EqualizerApp:
         ttk.Button(top_row, text="\U0001F4BE Export Mixed WAV...",
                    command=self.on_export_voices_mixed).pack(side="left", padx=3)
 
-        self.voices_summary_var = tk.StringVar(
-            value="Load audio with more than one talker (try \U0001F5E3 Two-Voice Demo), then click "
-                  "Separate Voices. This uses pitch/formant clustering (no AI models), so it works best "
-                  "when the voices sit in noticeably different pitch ranges.")
+        self.voices_summary_var = tk.StringVar(value=self.VOICES_IDLE_TEXT)
         ttk.Label(frame, textvariable=self.voices_summary_var, wraplength=1000,
                   font=("Segoe UI", 9), foreground=SUBTEXT).pack(side="top", fill="x", padx=8, pady=(2, 6))
 
         self.voices_cards_frame = ttk.Frame(frame, style="Toolbar.TFrame")
         self.voices_cards_frame.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
 
+    # single source of truth for the voice-tab's idle instructional text,
+    # so it can be restored whenever separation results become stale
+    VOICES_IDLE_TEXT = ("Pick \"Two-Voice Demo\" or \"Three-Voice Demo\" from the Demo dropdown above "
+                         "(it will separate automatically), or load your own multi-talker audio and click "
+                         "Separate Voices. This uses pitch/formant clustering (no AI models), so it works "
+                         "best when the voices sit in noticeably different pitch ranges.")
+
     def _clear_voice_separation(self):
         """Forget any previously separated voices (called whenever a new
         signal is loaded, since old separated streams belong to the old
-        signal)."""
+        signal) -- and reset the summary text too, so switching to a
+        different demo never leaves a stale "Voice 1: ~99Hz..." result
+        on screen describing audio that isn't loaded anymore."""
         self.voice_streams = None
         self.voice_info = None
         self.voice_eqs = []
@@ -842,6 +868,7 @@ class EqualizerApp:
         self.voice_widgets = []
         for child in self.voices_cards_frame.winfo_children():
             child.destroy()
+        self.voices_summary_var.set(self.VOICES_IDLE_TEXT)
 
     def on_separate_voices(self):
         if self.x is None:
@@ -967,6 +994,8 @@ class EqualizerApp:
         self.x, self.fs = make_synthetic_test_signal()
         self.dirty = True
         self._clear_voice_separation()
+        self.demo_var.set(DEMO_OPTIONS[0][0])
+        self.loaded_info_var.set(f"loaded: {len(self.x)/self.fs:.1f}s tone")
         self.status_var.set(f"Loaded synthetic test signal ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz).")
         self.update_plot()
         self._reset_waveform_display()
@@ -975,20 +1004,67 @@ class EqualizerApp:
         self.x, self.fs = make_demo_music_signal()
         self.dirty = True
         self._clear_voice_separation()
+        self.demo_var.set(DEMO_OPTIONS[1][0])
+        self.loaded_info_var.set(f"loaded: {len(self.x)/self.fs:.1f}s music")
         self.status_var.set(f"Loaded demo music track ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz) "
                              f"-- bass + melody + hi-hats, good for hearing EQ changes.")
         self.update_plot()
         self._reset_waveform_display()
 
-    def _load_two_voice_demo(self):
-        self.x, self.fs = make_two_voice_test_signal()
+    def on_load_demo(self, event=None):
+        key = dict(DEMO_OPTIONS).get(self.demo_var.get())
+        if key == "synthetic":
+            self._load_synthetic()
+        elif key == "music":
+            self._load_demo_music()
+        elif key == "two_voice":
+            self._load_voice_demo(make_two_voice_test_signal, n_voices=2,
+                                   label="two-voice demo (a lower-register and a higher-register talker, "
+                                         "different vowel colors, different speaking rhythms)")
+        elif key == "three_voice":
+            self._load_voice_demo(make_three_voice_test_signal, n_voices=3,
+                                   label="three-voice demo (low, mid, and high register talkers)")
+        elif key == "noise":
+            self._load_noise_demo()
+
+    def _load_voice_demo(self, loader_fn, n_voices, label):
+        self.x, self.fs = loader_fn()
         self.dirty = True
         self._clear_voice_separation()
-        self.status_var.set(f"Loaded two-voice demo ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz) "
-                             f"-- a low-register and a high-register synthetic talker, often overlapping. "
-                             f"Try the Voice Separation tab.")
+        self.demo_var.set(DEMO_OPTIONS[2][0] if n_voices == 2 else DEMO_OPTIONS[3][0])
+        self.loaded_info_var.set(f"loaded: {len(self.x)/self.fs:.1f}s, {n_voices} talkers")
+        self.status_var.set(f"Loaded {label} ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz). Separating voices...")
         self.update_plot()
         self._reset_waveform_display()
+        self.root.update_idletasks()
+        self.notebook.select(self.voices_tab)
+        self.n_voices_var.set(n_voices)
+        self.on_separate_voices()
+        # give each voice a little EQ lift on its own card so Play Solo /
+        # Play Mixed has an audible EQ effect too, not just the raw separation
+        for v in range(len(self.voice_widgets)):
+            self.voice_widgets[v]["gains"][0].set(3.0)   # a touch more low end
+            self.on_voice_slider(v, 0)
+
+    def _load_noise_demo(self):
+        self.x, self.fs = make_noise_demo_signal()
+        self.dirty = True
+        self._clear_voice_separation()
+        self.demo_var.set(DEMO_OPTIONS[4][0])
+        self.loaded_info_var.set(f"loaded: {len(self.x)/self.fs:.1f}s, hum+hiss")
+        self.hum_var.set(True)
+        self.noise_reduction_var.set("spectral_gate")
+        self.status_var.set(
+            f"Loaded noise reduction demo ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz) -- a clean melody "
+            f"buried under hiss and 50Hz hum. Hum removal + spectral gating are now both turned ON -- "
+            f"click Play Original, then Play Equalized, to hear the difference (and see it below).")
+        self.update_plot()
+        self._reset_waveform_display()
+        # jump straight to the Before/After metrics + spectrum view, so the
+        # noise reduction is immediately visible, not just audible -- the
+        # same "show, don't just tell" treatment the voice demos get above
+        self.analysis_view_var.set("Spectrum")
+        self.notebook.select(self.analysis_tab)  # on_tab_changed() runs update_analysis() for us
 
     def on_load_wav(self):
         path = filedialog.askopenfilename(filetypes=[("WAV files", "*.wav")])
@@ -998,6 +1074,8 @@ class EqualizerApp:
         self.dirty = True
         self.graphic_eq = GraphicEQ(self.fs)  # rebuild filter bank at the new sample rate
         self._clear_voice_separation()
+        self.demo_var.set("")  # not one of the built-in demos
+        self.loaded_info_var.set(f"loaded: {os.path.basename(path)}")
         self.status_var.set(f"Loaded {os.path.basename(path)} ({len(self.x)/self.fs:.1f}s @ {self.fs}Hz).")
         self.update_plot()
         self._reset_waveform_display()
